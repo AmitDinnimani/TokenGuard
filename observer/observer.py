@@ -4,16 +4,14 @@ import uuid
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
-# Provide compatibility in case we run this from different entry points
-try:
-    from .operations import CostCalculator
-except ImportError:
-    from operations import CostCalculator
+from config.config import Config
+from observer.operations import CostCalculator
 
 @dataclass
 class TokenMetrics:
-    """Enterprise-level schema for tracking individual prompt lifecycles with clear labels."""
+    """Production schema for tracking prompt lifecycles."""
     request_id: str
     timestamp_utc: str
     
@@ -22,7 +20,7 @@ class TokenMetrics:
     compressed_prompt_tokens: int = 0
     completion_tokens: int = 0
     
-    # Prompt Texts
+    # Prompt Texts (Optional: in high-security prod, you might only log tokens)
     original_prompt_text: str = ""
     compressed_prompt_text: str = ""
     
@@ -30,36 +28,27 @@ class TokenMetrics:
     is_compressed: bool = False
     compression_time_ms: float = 0.0
     
-    # Financial metrics for robust tracking
+    # Financial metrics
     original_estimated_cost_usd: float = 0.0
     actual_cost_usd: float = 0.0
     tokens_saved: int = 0
     cost_saved_usd: float = 0.0
 
 class TokenObserver:
-    def __init__(self, log_dir: str = "logs"):
+    def __init__(self, log_dir: Optional[str] = None):
         """
-        Enterprise-level observer for tracking TokenGuard metrics.
-        Appends structured JSON logs per request for easy ingestion by Datadog, ELK, or CloudWatch.
+        Production observer for tracking TokenGuard metrics.
+        Appends single-line JSON entries (JSONL) for easy ingestion by log aggregators.
         """
-        self.log_dir = Path(log_dir)
+        self.log_dir = Path(log_dir or Config.LOG_DIR)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.log_file = self.log_dir / "tokenguard_telemetry.jsonl"
+        self.log_file = Path(Config.TELEMETRY_FILE)
         
-        # Setup structured console logging
         self.logger = logging.getLogger("TokenGuard.Observer")
-        if not self.logger.hasHandlers():
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
-        self.logger.setLevel(logging.INFO)
-        
-        # Thread-safe mapping of active requests
         self.active_requests: dict[str, TokenMetrics] = {}
 
     def start_request(self) -> str:
-        """Starts a new tracking session and returns its unique request ID."""
+        """Starts a new tracking session."""
         req_id = str(uuid.uuid4())
         self.active_requests[req_id] = TokenMetrics(
             request_id=req_id,
@@ -69,59 +58,60 @@ class TokenObserver:
         return req_id
 
     def record_original_prompt(self, req_id: str, tokens: int, text: str = ""):
-        """Records the initial raw prompt tokens, text structure, and its theoretical cost."""
+        """Records initial prompt metadata."""
         metrics = self.active_requests.get(req_id)
         if metrics:
             metrics.original_prompt_tokens = tokens
-            metrics.original_prompt_text = text
+            if Config.ENABLE_PROMPT_LOGGING:
+                metrics.original_prompt_text = text
             metrics.original_estimated_cost_usd = CostCalculator.calculate_input_cost(tokens)
 
     def record_compressed_prompt(self, req_id: str, tokens: int, time_ms: float, text: str = ""):
-        """Logs the fact the prompt was compressed, updating cost savings appropriately."""
+        """Records compression results and savings."""
         metrics = self.active_requests.get(req_id)
         if metrics:
             metrics.compressed_prompt_tokens = tokens
-            metrics.compressed_prompt_text = text
+            if Config.ENABLE_PROMPT_LOGGING:
+                metrics.compressed_prompt_text = text
             metrics.is_compressed = True
             metrics.compression_time_ms = time_ms
             
-            # Calculate and record exact savings
             metrics.tokens_saved = metrics.original_prompt_tokens - tokens
             orig_cost = metrics.original_estimated_cost_usd
             new_cost = CostCalculator.calculate_input_cost(tokens)
-            metrics.cost_saved_usd = orig_cost - new_cost
-            self.logger.info(f"Compressed prompt [{req_id}]. Saved {metrics.tokens_saved} tokens "
-                             f"(${metrics.cost_saved_usd:.4f}).")
+            metrics.cost_saved_usd = max(0.0, orig_cost - new_cost)
+            
+            self.logger.info(f"Compressed [{req_id}]: Saved {metrics.tokens_saved} tokens "
+                             f"(${metrics.cost_saved_usd:.5f})")
 
     def record_completion(self, req_id: str, tokens: int):
-        """Records output tokens from the primary LLM call."""
+        """Records output tokens."""
         metrics = self.active_requests.get(req_id)
         if metrics:
             metrics.completion_tokens = tokens
             
     def finalize_request(self, req_id: str):
-        """Calculates final totals, writes telemetry to the JSONL log, and cleans memory footprint."""
+        """Finalizes metrics and persists to JSONL log."""
         metrics = self.active_requests.pop(req_id, None)
         if not metrics:
-            self.logger.warning(f"Attempted to finalize tracking for unknown or cleared request: {req_id}")
+            self.logger.warning(f"Finalize failed: Unknown request ID {req_id}")
             return
             
-        # Overall cost calculation (Input + Output)
-        input_tokens = (metrics.compressed_prompt_tokens 
-                        if metrics.is_compressed 
-                        else metrics.original_prompt_tokens)
-        
+        input_tokens = metrics.compressed_prompt_tokens if metrics.is_compressed else metrics.original_prompt_tokens
         input_cost = CostCalculator.calculate_input_cost(input_tokens)
         output_cost = CostCalculator.calculate_output_cost(metrics.completion_tokens)
         
         metrics.actual_cost_usd = input_cost + output_cost
         
-        # Persist structured log
+        # Persist as single-line JSON (standard JSONL)
         self._append_to_log(asdict(metrics))
-        self.logger.info(f"Finalized request {metrics.request_id}. "
-                         f"Final Cost: ${metrics.actual_cost_usd:.4f}")
+        self.logger.info(f"Finalized {req_id}. Total Cost: ${metrics.actual_cost_usd:.5f}")
 
     def _append_to_log(self, data: dict):
-        """Atomically appends JSON entry to log."""
-        with open(self.log_file, "a") as f:
-            f.write(json.dumps(data, indent=4) + "\n")
+        """Atomically appends JSON entry to log file."""
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                # Use indent=None for standard JSONL format
+                f.write(json.dumps(data) + "\n")
+        except Exception as e:
+            self.logger.error(f"Failed to write telemetry to {self.log_file}: {e}")

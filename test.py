@@ -1,58 +1,48 @@
-from decorators.decorator import guard
-import json
-import urllib.request
-import urllib.error
+import asyncio
+import logging
 import time
+from decorators.decorator import guard
 
-# We tell TokenGuard to monitor and compress the 'system_prompt' variable!
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s - %(message)s'
+)
+
+# 1. Sync Example
 @guard(prompt_arg_name="system_prompt")
-def chat_with_ollama(prompt: str, system_prompt: str) -> str:
-    """Real LLM call to local Ollama API."""
-    # print(f"[Sending Request to Ollama] Model: qwen2.5-coder:7b-instruct-q4_K_M")
-    # print(f"System Prompt Length: {len(system_prompt)} chars, User Prompt Length: {len(prompt)} chars")
-    
-    url = "http://localhost:11434/api/generate"
-    data = {
-        "model": "qwen2.5-coder:7b-instruct-q4_K_M",
-        "prompt": prompt,
-        "system": system_prompt,
-        "stream": False
-    }
-    
-    req = urllib.request.Request(
-        url, 
-        data=json.dumps(data).encode('utf-8'), 
-        headers={'Content-Type': 'application/json'}
-    )
-    
-    try:
-        with urllib.request.urlopen(req, timeout=120.0) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            return result.get('response', '').strip()
-    except Exception as e:
-        return f"[Error communicating with Ollama: {e}]"
+def sync_chat(prompt: str, system_prompt: str) -> str:
+    return f"Sync Response for prompt length {len(system_prompt)}"
 
+# 2. Async Example
+@guard(prompt_arg_name="system_prompt")
+async def async_chat(prompt: str, system_prompt: str) -> str:
+    await asyncio.sleep(0.1) # Simulate async I/O
+    return f"Async Response for prompt length {len(system_prompt)}"
+
+
+async def main():
+    print("--- Starting Production-Grade TokenGuard Demo ---\n")
+    
+    # Test 1: Sync call with small prompt
+    print("Test 1: Sync Normal Prompt")
+    res1 = sync_chat("Hello", "You are a helpful assistant.")
+    print(f"Result 1: {res1}\n")
+    
+    # Test 2: Async call with small prompt
+    print("Test 2: Async Normal Prompt")
+    res2 = await async_chat("Hello", "You are a helpful assistant.")
+    print(f"Result 2: {res2}\n")
+    
+    # Test 3: Async call with huge prompt (triggers compression)
+    print("Test 3: Async Large Prompt (Budget Breach)")
+    huge_system = "Instructions: " + ("DO NOT FORGET THIS. " * 1000)
+    
+    # We use a very small limit to force compression
+    res3 = await async_chat("Hello", huge_system, limit=0.0001)
+    print(f"Result 3: {res3}\n")
+    
+    print("Demo Complete. Telemetry logged to logs/tokenguard_telemetry.jsonl")
 
 if __name__ == "__main__":
-    # print("\n🟢 === Test 1: Normal System Prompt (Under Budget) ===")
-    normal_system = "You are a helpful assistant. Keep your response exactly to one very very extremely short sentence."
-    user_msg = "What is the capital of France?"
-    
-    response1 = chat_with_ollama(prompt=user_msg, system_prompt=normal_system)
-    # print(f"🤖 --> Ollama Response 1:\n{response1}\n")
-    
-    time.sleep(2)
-    
-    # print("\n🔴 === Test 2: Huge System Prompt (Over Budget) ===")
-    # Generates a massive system prompt to heavily breach the $0.001 limit set in decorator.py
-    huge_system = "You are a highly strict AI assistant. " + ("The quick brown fox jumps over the lazy dog. " * 800 )
-    huge_system += "\n just provide the compression as output nothing else."
-    # huge_system += "\n\nCRITICAL INSTRUCTION: You MUST reply entirely with ONLY the word 'ACKNOWLEDGED'."
-    
-    user_msg2 = "Did you receive and process my massive system instructions? Please answer per instruction."
-    
-    # Notice here, TokenGuard will intercept 'system_prompt' and shrink it before it reaches 'chat_with_ollama'
-    response2 = chat_with_ollama(prompt=user_msg2, system_prompt=huge_system)
-    # print(f"🤖 --> Ollama Response 2:\n{response2}\n")
-    
-    # print("\n[INFO] Check 'logs/tokenguard_telemetry.jsonl' to see your enterprise logs!")
+    asyncio.run(main())

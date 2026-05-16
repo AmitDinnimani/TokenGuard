@@ -1,62 +1,94 @@
-from functools import wraps
+import logging
+import inspect
+import functools
+from typing import Optional, Any, Callable, Dict, Tuple
 from core.processor import TokenGuardProcessor
+from config.config import Config
 
-# Instantiate a global processor with a strict limit for demo purposes ($0.001)
-processor = TokenGuardProcessor(limit=0.001)
+logger = logging.getLogger("TokenGuard.Decorator")
+processor = TokenGuardProcessor()
 
-def guard(limit: float = None, prompt_arg_name: str = None):
+def guard(limit: Optional[float] = None, prompt_arg_name: Optional[str] = None):
     """
-    TokenGuard Decorator.
-    Intercepts function calls, validates cost budget based on tokens, compresses if necessary, and logs telemetry.
-    Can be used with or without arguments: @guard, @guard(limit=0.05), @guard(prompt_arg_name="system_prompt")
+    TokenGuard Decorator. Supports both sync and async functions.
+    Intelligently identifies the prompt argument using signature inspection.
     """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            prompt = None
-            prompt_idx = -1
-            
-            # Identify where the prompt is. Look for explicit kwarg, implicit 'prompt' kwarg, or fallback to first arg.
-            if prompt_arg_name and prompt_arg_name in kwargs:
-                prompt = kwargs[prompt_arg_name]
-            elif not prompt_arg_name and 'prompt' in kwargs:
-                prompt = kwargs['prompt']
-            elif len(args) > 0 and isinstance(args[0], str):
-                prompt = args[0]
-                prompt_idx = 0
-            
-            if not prompt:
-                return func(*args, **kwargs)
+    def decorator(func: Callable) -> Callable:
+        sig = inspect.signature(func)
+        
+        @functools.wraps(func)
+        def _get_wrapper():
+            if inspect.iscoroutinefunction(func):
+                async def async_wrapper(*args, **kwargs) -> Any:
+                    # Extract limit if passed as kwarg, else use decorator default
+                    call_limit = kwargs.pop('limit', limit)
+                    
+                    call_args = sig.bind(*args, **kwargs)
+                    call_args.apply_defaults()
+                    
+                    prompt, key = _find_prompt(call_args.arguments, prompt_arg_name)
+                    if not prompt:
+                        return await func(*args, **kwargs)
 
-            # Delegate to processor orchestrator
-            final_prompt, req_id = processor.process(prompt, dynamic_limit=limit)
-            
-            # Reconstruct function arguments substituting the uncompressed text with the final prompt
-            new_args = list(args)
-            if prompt_idx >= 0:
-                new_args[prompt_idx] = final_prompt
-            elif prompt_arg_name:
-                kwargs[prompt_arg_name] = final_prompt
+                    final_prompt, req_id = await processor.process_async(prompt, dynamic_limit=call_limit)
+                    
+                    # Inject final prompt back into arguments
+                    call_args.arguments[key] = final_prompt
+                    
+                    # Reconstruct args/kwargs without 'limit'
+                    result = await func(*call_args.args, **call_args.kwargs)
+                    _record_completion(req_id, result)
+                    return result
+                return async_wrapper
             else:
-                kwargs['prompt'] = final_prompt
+                def sync_wrapper(*args, **kwargs) -> Any:
+                    call_limit = kwargs.pop('limit', limit)
+
+                    call_args = sig.bind(*args, **kwargs)
+                    call_args.apply_defaults()
+                    
+                    prompt, key = _find_prompt(call_args.arguments, prompt_arg_name)
+                    if not prompt:
+                        return func(*args, **kwargs)
+
+                    final_prompt, req_id = processor.process(prompt, dynamic_limit=call_limit)
+                    
+                    call_args.arguments[key] = final_prompt
+                    
+                    result = func(*call_args.args, **call_args.kwargs)
+                    _record_completion(req_id, result)
+                    return result
+                return sync_wrapper
+
+        return _get_wrapper()
+
+    def _find_prompt(arguments: Dict[str, Any], arg_name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """Locates the prompt value and its key in the arguments dictionary."""
+        # 1. Search by explicit name
+        if arg_name and arg_name in arguments:
+            return arguments[arg_name], arg_name
+        
+        # 2. Search by default name 'prompt'
+        if 'prompt' in arguments:
+            return arguments['prompt'], 'prompt'
+            
+        # 3. Fallback: First string argument that isn't 'self' or 'cls'
+        for k, v in arguments.items():
+            if k not in ('self', 'cls') and isinstance(v, str):
+                return v, k
                 
-            print(f"🚀 [TokenGuard] Executing target function: {func.__name__}()\n")
-            result = func(*new_args, **kwargs)
-            
-            # Post-execution output processing metric tracking
-            result_str = str(result)
-            output_tokens, _ = processor.tokenizer.count(result_str)
-            
+        return None, None
+
+    def _record_completion(req_id, result):
+        try:
+            output_tokens, _ = processor.tokenizer.count(str(result))
             processor.observer.record_completion(req_id, output_tokens)
+        finally:
             processor.observer.finalize_request(req_id)
-            
-            return result
-        return wrapper
-    
-    # Enable usage of @guard without () safely
+
     if callable(limit):
-        func = limit
+        f = limit
         limit = None
-        return decorator(func)
+        return decorator(f)
         
     return decorator
