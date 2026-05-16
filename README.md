@@ -1,84 +1,105 @@
 # 🛡️ TokenGuard
 
-**TokenGuard** is an enterprise-grade Python library designed to monitor, protect, and optimize LLM token budgets in real-time. It acts as an intelligent proxy between your application and your LLM, automatically compressing over-budget prompts using local models (Ollama) to ensure cost-efficiency and system stability.
+**TokenGuard** is an intelligent assistant for your LLM (Large Language Model) applications. It acts like a "security guard" for your AI costs, making sure you never spend too much on a single request by automatically shrinking large prompts before they are sent to expensive cloud models.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Asyncio Supported](https://img.shields.io/badge/asyncio-supported-brightgreen.svg)](https://docs.python.org/3/library/asyncio.html)
 
-## ✨ Features
+---
 
-- 🚀 **Hybrid Async/Sync Support**: First-class support for both synchronous and asynchronous Python functions.
-- 📉 **Auto-Compression**: Automatically detects budget breaches and compresses prompts using local LLMs (via Ollama).
-- 🧠 **Smart Caching**: Built-in LRU caching to avoid redundant compression of identical prompts.
-- 📊 **Enterprise Telemetry**: Structured JSONL logging for seamless integration with Datadog, ELK, or CloudWatch.
-- 🛡️ **DoS Protection**: Built-in input validation to prevent large-payload memory exhaustion.
-- 🔌 **Strategy Pattern**: Extensible architecture to support multiple compression providers (Ollama, OpenAI, local BERT).
+## 🤔 What does TokenGuard do?
 
-## 🚀 Quick Start
+Imagine you have a monthly budget for an AI service like OpenAI or Anthropic. Occasionally, a user might send a massive document that costs $2.00 just to process. If 1,000 users do that, your budget is gone in minutes.
 
-### 1. Installation
+**TokenGuard solves this by:**
+1.  **Watching**: It counts every token in your prompt before it's sent.
+2.  **Checking**: It calculates the cost. If the cost is higher than your set limit, it "blows the whistle."
+3.  **Shrinking**: Instead of failing, it sends the huge prompt to a **local, free AI** (via Ollama) to summarize and compress it while keeping the important instructions.
+4.  **Saving**: It sends the much smaller, cheaper prompt to your main AI, saving you up to 90% in costs.
+
+---
+
+## ✨ Key Features
+
+- ⚡ **Lightning Fast Async**: Works perfectly with modern "async" web apps (like FastAPI) so your users don't wait.
+- 📉 **Auto-Compression**: Uses a local model (Ollama) to rewrite long prompts into short, punchy versions that cloud LLMs still understand.
+- 🚀 **Smart Memory (Caching)**: If you send the same long prompt twice, TokenGuard remembers the compressed version, making the second time instant.
+- 📝 **Detailed Logs (Telemetry)**: Every request is saved in a simple file (`.jsonl`) so you can see exactly how much money you saved at the end of the month.
+- 🛡️ **Safety First**: Prevents "Denial of Service" (DoS) attacks by blocking prompts that are way too large for your system to handle.
+
+---
+
+## 🛠️ Installation
+
+### 1. Requirements
+Make sure you have [Ollama](https://ollama.com/) installed and running on your machine.
+
+### 2. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configuration
-Copy `.env.example` to `.env` and configure your Ollama endpoint:
+### 3. Setup Configuration
+Create a `.env` file in your project folder (you can copy `.env.example`):
+
 ```bash
+# Where is your Ollama running?
 TOKENGUARD_OLLAMA_ENDPOINT=http://localhost:11434/api/generate
+
+# Which local model should do the shrinking? (Any Ollama model works)
 TOKENGUARD_OLLAMA_MODEL=qwen2.5-coder:7b-instruct
-TOKENGUARD_BUDGET_LIMIT=0.05
+
+# What is the maximum $ cost allowed per request?
+TOKENGUARD_BUDGET_LIMIT=0.01
 ```
 
-### 3. Usage
+---
 
-#### Synchronous Functions
+## 🚀 How to use it
+
+### ⚡ The `@guard` Decorator
+Just add `@guard()` on top of any function that takes a prompt. It works for both normal and `async` functions!
+
 ```python
 from tokenguard.decorators.decorator import guard
 
-@guard(limit=0.001)
-def generate_text(prompt: str):
-    # If 'prompt' is too expensive, it will be auto-compressed before reaching here
-    return llm_call(prompt)
+# This function is now protected!
+@guard(limit=0.005) # Limit this specific call to $0.005
+def call_ai(prompt: str):
+    return cloud_llm.send(prompt)
 ```
 
-#### Asynchronous Functions
+### 🔧 Manual Usage (Advanced)
+If you want more control, you can use the `Processor` directly:
+
 ```python
-from tokenguard.decorators.decorator import guard
+from tokenguard.core.processor import TokenGuardProcessor
 
-@guard(prompt_arg_name="system_message")
-async def chat_async(user_input: str, system_message: str):
-    # 'system_message' will be compressed if it exceeds the token budget
-    return await async_llm_call(system_message, user_input)
+processor = TokenGuardProcessor()
+# This will return a shrunken prompt if the original is too expensive
+safe_prompt, request_id = processor.process("your very long prompt here...")
 ```
 
-## 🏗️ Architecture
+---
 
-TokenGuard follows a clean, decoupled architecture:
-- **Processors**: Orchestrate the token counting and compression logic.
-- **Compressors**: Pluggable strategies for prompt reduction (Ollama, etc.).
-- **Observers**: Handle high-performance telemetry and cost calculation.
-- **Decorators**: Provide a zero-boilerplate integration layer for developers.
+## 📁 Project Structure
 
-## 🧪 Testing
+- `core/`: The brain of the system (token counting, budget checking).
+- `compression/`: Logic for shrinking prompts using local models.
+- `decorators/`: The easy-to-use `@guard` tool.
+- `observer/`: The logging system that tracks your savings.
+- `tests/`: Automated checks to make sure everything works correctly.
 
-Run the standard test suite:
-```bash
-python tests/test_core.py
-```
+---
 
-Run the production demonstration:
-```bash
-python test.py
-```
+## 🛡️ Privacy & Security
 
-## 🛡️ Security
+We take your data seriously:
+- **Local Compression**: Your "shrunken" prompts never leave your own machine during compression.
+- **Privacy Mode**: You can turn off prompt logging to keep your data out of the log files (`TOKENGUARD_ENABLE_PROMPT_LOGGING=false`).
+- **Input Limits**: We automatically block prompts larger than 1,000,000 characters to keep your server stable.
 
-TokenGuard is built with security in mind:
-- **PII Filtering**: Optionally disable prompt logging in telemetry via `TOKENGUARD_ENABLE_PROMPT_LOGGING=false`.
-- **Input Validation**: Hard limits on input character size to prevent DoS attacks.
-- **Secret Management**: All configurations are managed via environment variables.
+---
 
 ## 📄 License
-
 MIT © [Amit Dinnimani](https://github.com/AmitDinnimani)
